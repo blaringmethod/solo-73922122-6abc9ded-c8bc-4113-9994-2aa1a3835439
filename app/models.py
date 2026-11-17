@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 #: PostgreSQL integer type OIDs -> canonical name.
 INT_TYPES: dict[int, str] = {
@@ -154,3 +154,48 @@ class JobResult(BaseModel):
     conflict: ConflictReport | None = None
     log: list[str] = Field(default_factory=list)
     selected_tables: list[str] = Field(default_factory=list)
+
+
+class TrialRow(BaseModel):
+    """One incremental row: the target table plus a value for every column.
+
+    Nullable columns accept JSON ``null``; a ``null`` sent to a NOT NULL
+    column is *not* a request error — it is rejected by the database during
+    the trial load and reported as an immediate-constraint failure, which is
+    exactly what the trial load exists to demonstrate. ``StrictInt`` keeps
+    JSON booleans/floats/strings from being silently coerced to integers.
+    """
+
+    table: str
+    values: dict[str, StrictInt | None]
+
+
+class TrialLoadRequest(BaseModel):
+    """Ordered batch of at most 20 incremental rows, applied in one transaction."""
+
+    rows: list[TrialRow] = Field(max_length=20)
+
+
+class TrialFailure(BaseModel):
+    """Database-reported failure of a trial load.
+
+    ``phase`` is ``row`` when an immediate constraint (NOT NULL, unique,
+    NOT DEFERRABLE foreign key, type bound) rejected the row at
+    ``row_index`` (0-based submission order), or ``commit`` when a
+    DEFERRABLE INITIALLY DEFERRED foreign key was only checked at COMMIT.
+    """
+
+    phase: str  # "row" | "commit"
+    row_index: int | None = None
+    table: str | None = None
+    sqlstate: str
+    constraint: str | None = None  # constraint name reported by the database
+    message: str  # primary message reported by the database
+
+
+class TrialLoadResponse(BaseModel):
+    job_id: str
+    ok: bool
+    #: per-table row counts after the trial load (only when ok)
+    row_counts: dict[str, int] | None = None
+    failure: TrialFailure | None = None

@@ -261,6 +261,13 @@ def test_match_simple_vs_full_mixed_null_distinction():
     child_full.unique_constraints.append(
         UniqueConstraint(name="uk_fk", columns=["f1", "f2"], is_primary=False)
     )
+    # Determinism: with f1 NOT NULL the all-NULL key shape is impossible, so
+    # the extra rows are *forced* into the mixed (f1, NULL) shape under SIMPLE;
+    # otherwise the solver may legitimately pick all-NULL rows instead and the
+    # mixed-NULL assertion below becomes a coin flip over z3's model choice.
+    for c in child_simple.columns:
+        if c.name == "f1":
+            c.nullable = False
     need_null = {
         "p": spec("p", 1, {"k1": (1, 1), "k2": (10, 10)}),
         # 4 child rows but only one non-NULL distinct (f1,f2); the rest must be

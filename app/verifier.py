@@ -41,6 +41,11 @@ def _run_negative(conn, sql: str, log: list[str], label: str, expect_sqlstate: s
     savepoint = f"sp_{secrets.token_hex(6)}"
     with conn.cursor() as cur:
         cur.execute(f"SAVEPOINT {q(savepoint)}")
+        # Force deferred constraints to check immediately, only within this
+        # savepoint (rolled back with it): an INITIALLY DEFERRED foreign key
+        # otherwise reports its violation at COMMIT, not at this statement,
+        # and the probe would falsely conclude the constraint is not enforced.
+        cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
         try:
             cur.execute(sql)
         except psycopg.Error as exc:

@@ -53,6 +53,7 @@ docker compose up --build
 | POST | `/jobs` | 提交生成+验证作业（后台执行），返回 `job_id` |
 | GET | `/jobs/{job_id}` | 状态、无解冲突报告、逐步日志 |
 | GET | `/jobs/{job_id}/download` | 仅在验证成功后下载 zip（含 5 个文件） |
+| POST | `/jobs/{job_id}/trial-load` | 批次试装：在隔离空库装载原包后，把增量批次放进同一事务试装 |
 
 ### 请求体
 
@@ -98,6 +99,31 @@ psql "$EMPTY_DATABASE_DSN" -v ON_ERROR_STOP=1 \
   -f 01_schema.sql -f 02_data.sql -f 03_constraints.sql
 ```
 
+### 批次试装（trial-load）
+
+检验分工的增量数据在交给装载回归前，可先对某个 **已验证成功** 的作业试装：
+
+```json
+POST /jobs/{job_id}/trial-load
+{
+  "rows": [
+    {"table": "dept",     "values": {"dept_id": 90001, "dept_code": 7, "parent_dept": null, "mgr_emp": null}},
+    {"table": "employee", "values": {"emp_id": 90002, "dept_id": 90001, "mentor_id": null, "level": 3}}
+  ]
+}
+```
+
+- 每次提交为**有顺序的至多 20 行**；每行给出所选表名及**全部整数列值**（可空列可填
+  `null`，缺列/多列/表不在作业中均返回 422）。完整示例见 `examples/trial_load_rows.json`。
+- 每次试装在验证集群**新建隔离空库**，原样装载该作业的 SQL 包后，把整批增量按提交
+  顺序放进**同一事务**：即时约束（NOT NULL、主键/唯一键、`NOT DEFERRABLE` 外键、整数
+  类型边界）在出错行即报；`DEFERRABLE INITIALLY DEFERRED` 外键在 `COMMIT` 时才报。
+- 成功返回各表试装后行数；失败返回 `failure`：`phase` 为 `row`（含 0 基 `row_index`、
+  表名）或 `commit`，并附数据库报告的 `sqlstate`、约束名与消息。**失败整体回滚，不留
+  下半批**，隔离库随即销毁。
+- 试装**每次均从原包开始**：不修改已发布的包，下载内容不变；同一作业的并发试装各自
+  使用独立隔离库，互不串批；源库始终保持只读，试装不触碰源库。
+
 ## 循环引用检验表示例
 
 `sql/00_demo_source_schema.sql` 构成如下循环图（全部整数列、零行）：
@@ -136,9 +162,9 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/
 ## 目录结构
 
 ```
-app/            FastAPI + 内省 + z3 求解 + SQL 渲染 + 隔离库验证
+app/            FastAPI + 内省 + z3 求解 + SQL 渲染 + 隔离库验证 + 批次试装
 sql/            循环引用检验表源结构、源库初始化（只读角色）
-examples/       循环四表、无解冲突、闭包扩展三类请求示例
-tests/          34 个单元/集成/端到端测试（真实 PostgreSQL）
+examples/       循环四表、无解冲突、闭包扩展三类生成请求示例 + 试装批次示例
+tests/          47 个单元/集成/端到端测试（真实 PostgreSQL）
 docker-compose.yml / Dockerfile / requirements.txt
 ```

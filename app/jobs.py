@@ -21,6 +21,7 @@ from .models import (
     GenerateRequest,
     JobResult,
     JobStatus,
+    TableSchema,
 )
 from .selector import validate_request
 from .solver import Generator, SolverTimeout, Unsatisfiable
@@ -32,6 +33,10 @@ class JobStore:
     def __init__(self) -> None:
         self._jobs: dict[str, JobResult] = {}
         self._packages: dict[str, dict[str, str]] = {}
+        # Catalog-derived structures of each published job, kept so the
+        # trial-load endpoint can validate row column sets without touching
+        # the source database again.
+        self._schemas: dict[str, dict[str, TableSchema]] = {}
         self._lock = threading.Lock()
 
     def create(self) -> str:
@@ -50,6 +55,9 @@ class JobStore:
     def package(self, job_id: str) -> dict[str, str] | None:
         return self._packages.get(job_id)
 
+    def schemas(self, job_id: str) -> dict[str, TableSchema] | None:
+        return self._schemas.get(job_id)
+
     def update(self, job_id: str, **kw) -> None:
         with self._lock:
             job = self._jobs[job_id]
@@ -62,9 +70,10 @@ class JobStore:
             job = self._jobs[job_id]
             job.log.append(f"{datetime.now(timezone.utc).time().isoformat()} {line}")
 
-    def publish(self, job_id: str, package: dict[str, str]) -> None:
+    def publish(self, job_id: str, package: dict[str, str], schemas: dict[str, TableSchema]) -> None:
         with self._lock:
             self._packages[job_id] = package
+            self._schemas[job_id] = schemas
 
     def purge_expired(self) -> None:
         now = time.time()
@@ -78,6 +87,7 @@ class JobStore:
             for jid in stale:
                 self._jobs.pop(jid, None)
                 self._packages.pop(jid, None)
+                self._schemas.pop(jid, None)
 
 
 STORE = JobStore()
@@ -275,7 +285,7 @@ def run_job(job_id: str, req: GenerateRequest) -> None:
             return
 
         # Only now is the package stored and downloadable.
-        store.publish(job_id, package)
+        store.publish(job_id, package, schemas)
         store.append_log(job_id, "package verified and published")
         store.update(job_id, status=JobStatus.SUCCEEDED)
     except Exception as exc:  # defensive: never leave a job dangling

@@ -1,0 +1,21 @@
+{
+  "_comment": "批次试装示例：对 examples/request_cyclic_four_tables.json 生成的成功作业 POST /jobs/{job_id}/trial-load。四行按顺序在同一事务内试装：先插新部门，再插引用该部门的新员工，再插 MATCH FULL 引用该部门复合键的新项目，最后插引用新员工+新项目的 assignment。可空列显式给 null。",
+  "rows": [
+    {
+      "table": "dept",
+      "values": {"dept_id": 90001, "dept_code": 7, "parent_dept": null, "mgr_emp": null}
+    },
+    {
+      "table": "employee",
+      "values": {"emp_id": 90002, "dept_id": 90001, "mentor_id": null, "level": 3}
+    },
+    {
+      "table": "project",
+      "values": {"project_id": 90003, "dept_id": 90001, "dept_code": 7, "budget": null}
+    },
+    {
+      "table": "assignment",
+      "values": {"emp_id": 90002, "project_id": 90003, "role_code": null}
+    }
+  ]
+}

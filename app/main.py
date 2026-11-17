@@ -9,12 +9,16 @@ GET  /schemas/{schema}/tables/{table}/structure
 POST /jobs                    create a generation/verification job
 GET  /jobs/{job_id}           status, conflict report, logs
 GET  /jobs/{job_id}/download  zip package, available only after SUCCEEDED
+POST /jobs/{job_id}/trial-load
+                              trial-load an ordered incremental batch against
+                              the published package in an isolated database
 GET  /docs                    OpenAPI Swagger UI
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import psycopg
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 
@@ -26,7 +30,8 @@ from .introspect import (
     list_base_tables,
 )
 from .jobs import STORE, package_zip, run_job
-from .models import GenerateRequest, JobStatus
+from .models import GenerateRequest, JobStatus, TrialLoadRequest, TrialLoadResponse
+from .trial import run_trial_load, validate_trial_rows
 
 
 @asynccontextmanager
@@ -41,6 +46,8 @@ app = FastAPI(
         "只读源库表结构（不读行数据），基于 z3 生成同时满足指定行数、整数闭区间与"
         "主键/唯一键/可空/MATCH SIMPLE/FULL 复合及循环外键约束的合成样本，"
         "并在隔离空库实际装载验证通过后才开放 SQL 包下载。"
+        "对成功作业可提交有顺序的增量批次试装：在隔离空库装载原包后于同一事务内"
+        "应用增量，报告即时约束或提交阶段（延迟外键）的数据库约束判定。"
     ),
     lifespan=lifespan,
 )
@@ -136,3 +143,43 @@ def download_job(job_id: str):
             "X-Contains-Real-Patient-Data": "false",
         },
     )
+
+
+@app.post("/jobs/{job_id}/trial-load", tags=["trial-load"], response_model=TrialLoadResponse)
+def trial_load(job_id: str, req: TrialLoadRequest):
+    """Trial-load an ordered batch of incremental rows against the published package.
+
+    The job's original SQL package is loaded into a fresh isolated database;
+    the rows are applied in submission order inside one transaction. The
+    response reports either per-table row counts after the trial load, or the
+    database-reported failure (the offending row, or the commit phase for
+    deferred foreign keys). A failed batch leaves nothing behind; the
+    published package and its download never change.
+    """
+    job = STORE.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job 不存在或已过期")
+    if job.status != JobStatus.SUCCEEDED:
+        raise HTTPException(
+            409,
+            f"仅验证成功的作业可试装（当前状态 {job.status.value}）",
+        )
+    package = STORE.package(job_id)
+    schemas = STORE.schemas(job_id)
+    if package is None or schemas is None:
+        raise HTTPException(409, "SQL 包不可用")
+    problems = validate_trial_rows(job.selected_tables, schemas, req.rows)
+    if problems:
+        raise HTTPException(
+            422,
+            detail=[{"object": o, "reason": r} for o, r in problems],
+        )
+    schema = next(iter(schemas.values())).schema_name
+    try:
+        return run_trial_load(
+            job_id, schema, job.selected_tables, schemas, package, req.rows
+        )
+    except psycopg.Error as exc:
+        raise HTTPException(
+            502, f"试装执行失败（验证集群）: {exc.__class__.__name__}: {exc}"
+        )
